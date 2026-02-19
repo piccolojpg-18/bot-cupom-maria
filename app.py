@@ -14,175 +14,131 @@ TELEGRAM_TOKEN = "8538755291:AAG2dmZW8KcAN7DnC7pnMIqoSqh490F1YiY"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Headers realistas
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
 }
 
 def enviar_telegram(chat_id, texto):
-    """Envia mensagem para o Telegram"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        'chat_id': chat_id,
-        'text': texto,
-        'parse_mode': 'Markdown'
-    }
+    payload = {'chat_id': chat_id, 'text': texto, 'parse_mode': 'Markdown'}
     try:
         requests.post(url, json=payload, timeout=5)
-        return True
-    except Exception as e:
-        logger.error(f"Erro Telegram: {e}")
-        return False
+    except:
+        pass
 
-def extrair_primeiro_produto_da_pagina(url_afiliado):
-    """
-    Acessa a página de perfil do afiliado e extrai os dados do PRIMEIRO produto da lista.
-    """
+def achar_qualquer_produto(url):
+    """Método BRUTAL: varre a página até achar qualquer coisa que pareça um produto"""
     try:
-        logger.info(f"Acessando página de perfil: {url_afiliado}")
-        response = requests.get(url_afiliado, headers=HEADERS, timeout=15)
+        logger.info(f"ACESSANDO: {url}")
+        response = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # ===== ENCONTRAR O PRIMEIRO PRODUTO =====
-        primeiro_produto = None
+        # SALVAR HTML PARA DEBUG (opcional, comente se não quiser)
+        with open('pagina.html', 'w', encoding='utf-8') as f:
+            f.write(response.text)
+        logger.info("HTML salvo para debug")
         
-        # Método 1: Procurar pelo primeiro preço
-        primeiro_preco = soup.find('span', class_='andes-money-amount__fraction')
-        if primeiro_preco:
-            # Subir até o container do produto
-            container = primeiro_preco.find_parent(['div', 'section', 'li'], 
-                                                  class_=re.compile(r'ui-search-layout__item|andes-card|product', re.I))
-            if container:
-                primeiro_produto = container
-                logger.info("Produto encontrado via preço")
+        # ==========================================
+        # MÉTODO 1: PROCURAR POR PREÇO (MAIS CONFIÁVEL)
+        # ==========================================
+        precos = soup.find_all(['span', 'div', 'p'], string=re.compile(r'R\$\s*\d+'))
+        logger.info(f"Encontrados {len(precos)} elementos com preço")
         
-        # Método 2: Procurar pelo primeiro link de produto
-        if not primeiro_produto:
-            links_produto = soup.find_all('a', href=re.compile(r'/p/|/MLB-'))
-            if links_produto:
-                primeiro_produto = links_produto[0].find_parent(['div', 'section', 'li'])
-                logger.info("Produto encontrado via link")
-        
-        if not primeiro_produto:
-            logger.warning("Nenhum produto encontrado")
-            return None
-        
-        # ===== EXTRAIR NOME =====
-        nome = "Nome não encontrado"
-        nome_tag = primeiro_produto.find(['h2', 'h3'], class_=re.compile(r'title|name|product', re.I))
-        if nome_tag:
-            nome = nome_tag.get_text(strip=True)
-        else:
-            # Tentar qualquer heading
-            heading = primeiro_produto.find(['h2', 'h3', 'h4'])
-            if heading:
-                nome = heading.get_text(strip=True)
-        
-        # ===== EXTRAIR PREÇO =====
-        preco = "Preço não encontrado"
-        preco_tag = primeiro_produto.find('span', class_='andes-money-amount__fraction')
-        if preco_tag:
-            preco_num = preco_tag.get_text(strip=True)
-            # Verificar centavos
-            centavos_tag = primeiro_produto.find('span', class_='andes-money-amount__cents')
-            if centavos_tag:
-                preco = f"{preco_num}.{centavos_tag.get_text(strip=True)}"
-            else:
-                preco = preco_num
-        
-        # ===== EXTRAIR PARCELAMENTO =====
-        parcelas = "Não informado"
-        # Procurar por texto com formato "Xx R$ YY,ZZ"
-        parcela_text = primeiro_produto.find(string=re.compile(r'\d+x\s*R\$\s*[\d.,]+', re.I))
-        if parcela_text:
-            parcelas = parcela_text.strip()
-        else:
-            # Procurar em spans
-            parcela_tag = primeiro_produto.find('span', class_=re.compile(r'installment', re.I))
-            if parcela_tag:
-                parcelas = parcela_tag.get_text(strip=True)
-        
-        # ===== EXTRAIR FRETE GRÁTIS =====
-        frete_gratis = False
-        frete_text = primeiro_produto.find(string=re.compile(r'Frete grátis|Frete GRÁTIS', re.I))
-        if frete_text:
-            frete_gratis = True
-        
-        # ===== FORMATAR PREÇO =====
-        if preco and preco != "Preço não encontrado":
-            # Remover pontos de milhar e converter vírgula
-            if '.' in preco and ',' in preco:
-                # Formato 1.234,56
-                preco = preco.replace('.', '').replace(',', '.')
-            elif ',' in preco:
-                # Formato 1234,56
-                preco = preco.replace(',', '.')
+        if precos:
+            # Pega o primeiro preço
+            preco_element = precos[0]
+            preco_text = preco_element.get_text(strip=True)
             
-            # Garantir duas casas decimais
-            if '.' in preco:
-                partes = preco.split('.')
-                if len(partes) == 2:
-                    if len(partes[1]) == 1:
-                        preco = f"{partes[0]}.{partes[1]}0"
-                    elif len(partes[1]) > 2:
-                        preco = f"{partes[0]}.{partes[1][:2]}"
-            else:
-                if len(preco) > 2:
-                    preco = f"{preco[:-2]}.{preco[-2:]}"
+            # Tenta encontrar o nome do produto perto deste preço
+            nome = "Produto encontrado"
+            
+            # Sobe 5 níveis procurando um nome
+            atual = preco_element
+            for _ in range(5):
+                if atual:
+                    # Procura por headings dentro deste elemento
+                    heading = atual.find(['h1', 'h2', 'h3', 'h4'])
+                    if heading:
+                        nome = heading.get_text(strip=True)
+                        break
+                    atual = atual.parent
                 else:
-                    preco = f"0.{preco.zfill(2)}"
+                    break
             
-            # Converter para formato brasileiro
-            if '.' in preco:
-                reais, centavos = preco.split('.')
-                # Adicionar pontos de milhar
-                if len(reais) > 3:
-                    reais = re.sub(r'(\d)(?=(\d{3})+(?!\d))', r'\1.', reais)
-                preco = f"R$ {reais},{centavos}"
+            # Se não achou heading, pega qualquer texto grande próximo
+            if nome == "Produto encontrado":
+                pai = preco_element.parent
+                textos = pai.find_all(string=True)
+                for t in textos:
+                    t = t.strip()
+                    if len(t) > 20 and 'R$' not in t:
+                        nome = t
+                        break
+            
+            # Limpar preço
+            preco_match = re.search(r'R\$\s*([\d.,]+)', preco_text)
+            if preco_match:
+                preco = preco_match.group(1)
+                if ',' in preco and '.' in preco:
+                    preco = preco.replace('.', '').replace(',', '.')
+                elif ',' in preco:
+                    preco = preco.replace(',', '.')
+                preco = f"R$ {preco}"
+            else:
+                preco = preco_text
+            
+            return nome, preco
         
-        logger.info(f"✅ Extraído: {nome[:50]}... - {preco}")
+        # ==========================================
+        # MÉTODO 2: PROCURAR POR IMAGENS DE PRODUTO
+        # ==========================================
+        imagens = soup.find_all('img', alt=True)
+        for img in imagens:
+            alt = img.get('alt', '')
+            if len(alt) > 20 and 'R$' not in alt:
+                # Achou uma imagem com texto alternativo longo
+                # Tenta encontrar preço perto desta imagem
+                pai = img.parent
+                for _ in range(3):
+                    texto_pai = pai.get_text()
+                    preco_match = re.search(r'R\$\s*([\d.,]+)', texto_pai)
+                    if preco_match:
+                        preco = preco_match.group(1)
+                        if ',' in preco and '.' in preco:
+                            preco = preco.replace('.', '').replace(',', '.')
+                        elif ',' in preco:
+                            preco = preco.replace(',', '.')
+                        return alt, f"R$ {preco}"
+                    pai = pai.parent
+                return alt, "Preço encontrado próximo"
         
-        return {
-            'nome': nome,
-            'preco': preco,
-            'parcelas': parcelas,
-            'frete_gratis': frete_gratis
-        }
+        # ==========================================
+        # MÉTODO 3: QUALQUER TEXTO GRANDE COM NÚMERO
+        # ==========================================
+        todos_textos = soup.find_all(string=True)
+        for texto in todos_textos:
+            texto = texto.strip()
+            if len(texto) > 30 and re.search(r'\d+', texto):
+                # Tem texto longo com número - provavelmente é produto
+                preco_match = re.search(r'R\$\s*([\d.,]+)', texto)
+                if preco_match:
+                    preco = preco_match.group(1)
+                    return texto[:100], f"R$ {preco}"
+                return texto[:100], "Preço não encontrado"
+        
+        return None, None
         
     except Exception as e:
-        logger.error(f"Erro na extração: {e}")
-        return None
-
-def extrair_dados_amazon(url):
-    """Extrai dados da Amazon"""
-    try:
-        logger.info(f"Extraindo Amazon: {url}")
-        response = requests.get(url, headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        nome = soup.find('span', {'id': 'productTitle'})
-        nome = nome.get_text(strip=True) if nome else "Nome não encontrado"
-        
-        preco = soup.find('span', {'class': 'a-price-whole'})
-        preco = preco.get_text(strip=True) if preco else "Preço não encontrado"
-        
-        # Formatar preço da Amazon
-        if preco != "Preço não encontrado":
-            preco = f"R$ {preco}"
-        
-        return nome, preco
-    except Exception as e:
-        logger.error(f"Erro Amazon: {e}")
-        return "Erro", "Erro na Amazon"
+        logger.error(f"Erro BRUTAL: {e}")
+        return None, None
 
 @app.route('/', methods=['GET'])
 def home():
-    return "✅ Bot de Preços - Versão Definitiva"
+    return "🔥 BOT RADICAL FUNCIONANDO"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Recebe mensagens do Telegram"""
     try:
         data = request.get_json()
         
@@ -190,71 +146,40 @@ def webhook():
             chat_id = data['message']['chat']['id']
             texto = data['message'].get('text', '').strip()
             
-            logger.info(f"Mensagem recebida: {texto}")
+            logger.info(f"RECEBIDO: {texto}")
+            enviar_telegram(chat_id, "⚡ Processando...")
             
-            # Resposta imediata
-            enviar_telegram(chat_id, "⏳ Processando...")
-            
-            # Comando /start
             if texto == '/start':
-                enviar_telegram(chat_id, 
-                    "🤖 *Bot de Preços - Versão Definitiva*\n\n"
-                    "Envie links que eu mostro o primeiro produto da página!\n\n"
-                    "📌 *Exemplos:*\n"
-                    "• https://mercadolivre.com/sec/2TCy2TB\n"
-                    "• https://amzn.to/46hzWsh"
-                )
+                enviar_telegram(chat_id, "🔥 *BOT RADICAL*\n\nEnvia qualquer link do Mercado Livre que eu acho o produto!")
                 return 'ok', 200
             
-            # MERCADO LIVRE
-            if 'mercadolivre' in texto or 'mercadolivre.com/sec' in texto:
-                enviar_telegram(chat_id, "🔍 Buscando primeiro produto da página...")
+            if 'mercadolivre' in texto:
+                enviar_telegram(chat_id, "🔍 Varrendo a página...")
                 
-                dados = extrair_primeiro_produto_da_pagina(texto)
+                nome, preco = achar_qualquer_produto(texto)
                 
-                if dados and dados['nome'] != "Nome não encontrado":
-                    msg = f"📦 *{dados['nome']}*\n\n"
-                    msg += f"💰 *{dados['preco']}*\n"
-                    
-                    if dados['parcelas'] != "Não informado":
-                        msg += f"💳 {dados['parcelas']}\n"
-                    
-                    if dados['frete_gratis']:
-                        msg += "🚚 *Frete Grátis*\n"
-                    
+                if nome:
+                    msg = f"📦 *{nome}*\n\n"
+                    if preco:
+                        msg += f"💰 *{preco}*"
+                    else:
+                        msg += "💰 Preço não encontrado"
                     enviar_telegram(chat_id, msg)
                 else:
-                    enviar_telegram(chat_id, 
-                        "❌ Não consegui encontrar um produto na página.\n\n"
-                        "Pode ser que:\n"
-                        "• O link seja inválido\n"
-                        "• A página não tenha produtos\n"
-                        "• O Mercado Livre mudou o layout"
-                    )
+                    enviar_telegram(chat_id, "❌ Não achei nada. Manda o link de novo?")
             
-            # AMAZON
-            elif 'amzn.to' in texto or 'amazon' in texto:
-                enviar_telegram(chat_id, "📦 Buscando na Amazon...")
-                nome, preco = extrair_dados_amazon(texto)
-                msg = f"📦 *Amazon*\n\n{nome}\n💰 {preco}"
-                enviar_telegram(chat_id, msg)
+            elif 'amzn' in texto:
+                enviar_telegram(chat_id, "📦 Amazon (vou implementar depois)")
             
-            # Link não reconhecido
             else:
-                enviar_telegram(chat_id, 
-                    "❌ Link não reconhecido.\n\n"
-                    "Envie links do:\n"
-                    "• Mercado Livre (mercadolivre.com/sec/...)\n"
-                    "• Amazon (amzn.to/...)"
-                )
+                enviar_telegram(chat_id, "❌ Manda link do Mercado Livre")
         
         return 'ok', 200
         
     except Exception as e:
-        logger.error(f"Erro no webhook: {e}")
+        logger.error(f"ERRO: {e}")
         return 'ok', 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
-    logger.info(f"🚀 Bot definitivo iniciado na porta {port}")
     app.run(host='0.0.0.0', port=port)
