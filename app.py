@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 app = Flask(__name__)
 
 # CONFIGURAÇÕES - COLE SEU TOKEN AQUI
-TELEGRAM_TOKEN = "8538755291:AAG2dmZW8KcAN7DnC7pnMIqoSqh490F1YiY"  ← SEU TOKEN
+TELEGRAM_TOKEN = "8538755291:AAG2dmZW8KcAN7DnC7pnMIqoSqh490F1YiY"
 TELEGRAM_CHAT_ID = None  # Será preenchido quando você mandar mensagem
 
 # Headers para simular navegador
