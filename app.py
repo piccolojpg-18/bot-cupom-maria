@@ -15,29 +15,26 @@ app = Flask(__name__)
 TELEGRAM_TOKEN = "8538755291:AAG2dmZW8KcAN7DnC7pnMIqoSqh490F1YiY"
 TELEGRAM_CHAT_ID = None
 
+# Credenciais do Mercado Livre (via variáveis de ambiente)
+ML_CLIENT_ID = os.environ.get('ML_CLIENT_ID')
+ML_CLIENT_SECRET = os.environ.get('ML_CLIENT_SECRET')
+ML_ACCESS_TOKEN = None  # Será obtido automaticamente
+
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Headers MAIS realistas (simulando Chrome)
+# Headers para simular navegador (para seguir redirects)
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
     'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none',
-    'Sec-Fetch-User': '?1',
-    'Cache-Control': 'max-age=0',
-    'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-    'sec-ch-ua-mobile': '?0',
-    'sec-ch-ua-platform': '"Windows"'
 }
 
-# Cache simples para URLs
+# Cache para tokens e URLs
+token_cache = {
+    'access_token': None,
+    'expires_at': None
+}
 url_cache = {}
 
 # Pool de threads
@@ -46,66 +43,137 @@ executor = ThreadPoolExecutor(max_workers=4)
 # Inicializar bot
 bot = telegram.Bot(token=TELEGRAM_TOKEN)
 
-def formatar_preco_real(valor_raw):
-    """Converte qualquer formato de preço para Real brasileiro (R$ 1.234,56)"""
-    if not valor_raw or valor_raw == "Preço não encontrado":
-        return "Preço não encontrado"
+def obter_token_ml():
+    """Obtém token de acesso à API do Mercado Livre"""
+    global token_cache
+    
+    # Verificar se token ainda é válido (dura 6 horas)
+    if token_cache['access_token'] and token_cache['expires_at']:
+        if datetime.now().timestamp() < token_cache['expires_at']:
+            logger.info("Usando token em cache")
+            return token_cache['access_token']
+    
+    logger.info("Obtendo novo token da API do ML")
+    
+    url = "https://api.mercadolibre.com/oauth/token"
+    payload = {
+        'grant_type': 'client_credentials',
+        'client_id': ML_CLIENT_ID,
+        'client_secret': ML_CLIENT_SECRET
+    }
     
     try:
-        valor_raw = str(valor_raw).strip()
+        response = requests.post(url, data=payload)
+        response.raise_for_status()
+        data = response.json()
         
-        # Caso 1: Formato 1.234,56 (já em formato brasileiro)
-        if '.' in valor_raw and ',' in valor_raw:
-            partes = valor_raw.split(',')
-            if len(partes) == 2:
-                reais = partes[0].replace('.', '')
-                centavos = partes[1].ljust(2, '0')[:2]
-                if len(reais) > 3:
-                    reais = re.sub(r'(\d)(?=(\d{3})+(?!\d))', r'\1.', reais)
-                return f"R$ {reais},{centavos}"
+        # Guardar token e tempo de expiração (6 horas = 21600 segundos)
+        token_cache['access_token'] = data['access_token']
+        token_cache['expires_at'] = datetime.now().timestamp() + data['expires_in']
         
-        # Caso 2: Formato 1234.56 (padrão americano)
-        elif '.' in valor_raw and not ',' in valor_raw:
-            partes = valor_raw.split('.')
-            if len(partes) == 2:
-                reais = partes[0]
-                centavos = partes[1].ljust(2, '0')[:2]
-                if len(reais) > 3:
-                    reais = re.sub(r'(\d)(?=(\d{3})+(?!\d))', r'\1.', reais)
-                return f"R$ {reais},{centavos}"
-        
-        # Caso 3: Formato 1234,56
-        elif ',' in valor_raw and not '.' in valor_raw:
-            partes = valor_raw.split(',')
-            if len(partes) == 2:
-                reais = partes[0]
-                centavos = partes[1].ljust(2, '0')[:2]
-                if len(reais) > 3:
-                    reais = re.sub(r'(\d)(?=(\d{3})+(?!\d))', r'\1.', reais)
-                return f"R$ {reais},{centavos}"
-        
-        # Caso 4: Apenas números (ex: 14699)
-        elif valor_raw.replace('.', '').isdigit():
-            numeros = valor_raw.replace('.', '')
-            if len(numeros) > 2:
-                reais = numeros[:-2]
-                centavos = numeros[-2:]
-                if len(reais) > 3:
-                    reais = re.sub(r'(\d)(?=(\d{3})+(?!\d))', r'\1.', reais)
-                return f"R$ {reais},{centavos}"
-            else:
-                return f"R$ 0,{numeros.zfill(2)}"
-        
-        return f"R$ {valor_raw}"
-        
+        logger.info("Token obtido com sucesso")
+        return data['access_token']
     except Exception as e:
-        logger.error(f"Erro ao formatar preço: {e}")
-        return f"R$ {valor_raw}"
+        logger.error(f"Erro ao obter token ML: {e}")
+        return None
+
+def extrair_id_produto_ml(url):
+    """
+    Extrai o ID do produto (MLB123456789) de qualquer URL do Mercado Livre
+    """
+    # Padrão 1: /p/MLB123456789
+    match = re.search(r'/p/(ML[B|C]\d+)', url)
+    if match:
+        return match.group(1)
+    
+    # Padrão 2: MLB123456789 na URL
+    match = re.search(r'(ML[B|C]\d{9,})', url)
+    if match:
+        return match.group(1)
+    
+    # Padrão 3: ID numérico simples
+    match = re.search(r'/ML[B|C]?-?(\d+)', url)
+    if match:
+        return f"MLB{match.group(1)}"
+    
+    return None
+
+def formatar_preco_real(valor):
+    """Converte preço para formato brasileiro"""
+    try:
+        if isinstance(valor, (int, float)):
+            valor = f"{valor:.2f}"
+        
+        valor = str(valor).replace('.', ',')
+        if ',' in valor:
+            partes = valor.split(',')
+            if len(partes[0]) > 3:
+                reais = re.sub(r'(\d)(?=(\d{3})+(?!\d))', r'\1.', partes[0])
+                return f"R$ {reais},{partes[1]}"
+        return f"R$ {valor}"
+    except:
+        return f"R$ {valor}"
+
+def consultar_produto_ml(item_id):
+    """
+    Consulta a API do Mercado Livre usando o ID do produto
+    """
+    token = obter_token_ml()
+    if not token:
+        return None, "Erro ao obter token de acesso"
+    
+    url = f"https://api.mercadolibre.com/items/{item_id}"
+    headers = {"Authorization": f"Bearer {token}"}
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        logger.info(f"API ML retornou dados para {item_id}")
+        
+        # Extrair informações principais
+        nome = data.get('title', 'Nome não encontrado')
+        preco_atual = data.get('price', 0)
+        preco_anterior = data.get('original_price', preco_atual)
+        
+        # Parcelamento
+        parcelamento = "Não informado"
+        if 'installments' in data and data['installments']:
+            quant = data['installments'].get('quantity', 0)
+            valor = data['installments'].get('amount', 0)
+            if quant and valor:
+                parcelamento = f"{quant}x R$ {valor:.2f} sem juros"
+        
+        # Frete grátis
+        frete_gratis = False
+        if 'shipping' in data:
+            frete_gratis = data['shipping'].get('free_shipping', False)
+        
+        # Formatar preços
+        preco_atual_str = formatar_preco_real(preco_atual)
+        preco_anterior_str = formatar_preco_real(preco_anterior)
+        
+        return {
+            'nome': nome,
+            'preco_atual': preco_atual_str,
+            'preco_anterior': preco_anterior_str,
+            'parcelamento': parcelamento,
+            'frete_gratis': frete_gratis,
+            'desconto': ((preco_anterior - preco_atual) / preco_anterior * 100) if preco_anterior > preco_atual else 0,
+            'link': data.get('permalink', '')
+        }, None
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Erro na API ML: {e}")
+        return None, f"Erro na consulta: {str(e)}"
+    except Exception as e:
+        logger.error(f"Erro inesperado: {e}")
+        return None, f"Erro inesperado: {str(e)}"
 
 def seguir_redirects_rapido(url):
     """Segue redirecionamentos de forma otimizada"""
     if url in url_cache:
-        logger.info(f"Cache hit: {url}")
         return url_cache[url]
     
     try:
@@ -113,7 +181,6 @@ def seguir_redirects_rapido(url):
         response = session.head(url, allow_redirects=True, timeout=8, headers=HEADERS)
         url_final = response.url
         url_cache[url] = url_final
-        logger.info(f"Redirect: {url} -> {url_final}")
         return url_final
     except:
         try:
@@ -122,165 +189,12 @@ def seguir_redirects_rapido(url):
             url_final = response.url
             response.close()
             url_cache[url] = url_final
-            logger.info(f"Redirect (GET): {url} -> {url_final}")
             return url_final
-        except Exception as e:
-            logger.error(f"Erro redirect: {e}")
+        except:
             return url
 
-def identificar_site_rapido(url):
-    """Identifica site de forma otimizada"""
-    url_lower = url.lower()
-    
-    if 'amazon' in url_lower or 'amzn' in url_lower:
-        return 'amazon'
-    elif any(x in url_lower for x in ['mercadolivre', 'mercadolibre', 'mercadolivre.com/sec']):
-        return 'mercadolivre'
-    return None
-
-def extrair_dados_perfil_ml(url):
-    """
-    Extrai dados completos da página de perfil do Mercado Livre
-    Versão final com busca inteligente
-    """
-    try:
-        logger.info("="*50)
-        logger.info(f"Iniciando extração para URL: {url}")
-        logger.info("="*50)
-        
-        session = requests.Session()
-        response = session.get(url, headers=HEADERS, timeout=15)
-        
-        logger.info(f"Status code: {response.status_code}")
-        logger.info(f"Tamanho da resposta: {len(response.text)} caracteres")
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # ===== INICIALIZAR VARIÁVEIS =====
-        nome = "Não encontrado"
-        preco_anterior = "Não encontrado"
-        preco_atual = "Não encontrado"
-        parcelamento = "Não informado"
-        frete_gratis = False
-        
-        # ===== 1. ENCONTRAR NOME DO PRODUTO =====
-        # Procurar por textos longos (provavelmente o nome do produto)
-        textos_longos = []
-        for elem in soup.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'span', 'div']):
-            texto = elem.get_text(strip=True)
-            if texto and len(texto) > 30 and 'R$' not in texto and 'x' not in texto:
-                textos_longos.append(texto)
-        
-        if textos_longos:
-            nome = textos_longos[0]
-            logger.info(f"Nome encontrado: {nome[:100]}")
-        
-        # ===== 2. ENCONTRAR TODOS OS PREÇOS =====
-        todos_precos = []
-        for elem in soup.find_all(['span', 'div', 'p', 'h3', 'h4']):
-            texto = elem.get_text()
-            # Procurar por padrões de preço
-            matches = re.findall(r'R\$\s*([\d.,]+)', texto)
-            for match in matches:
-                if match not in todos_precos:  # Evitar duplicatas
-                    todos_precos.append(match)
-        
-        logger.info(f"Preços encontrados: {todos_precos}")
-        
-        # ===== 3. CLASSIFICAR PREÇOS =====
-        if len(todos_precos) >= 2:
-            # Converter para float para comparar
-            precos_float = []
-            precos_originais = []
-            
-            for p in todos_precos:
-                p_clean = p.replace('.', '').replace(',', '.')
-                try:
-                    precos_float.append(float(p_clean))
-                    precos_originais.append(p)
-                except:
-                    pass
-            
-            if len(precos_float) >= 2:
-                # Encontrar o maior (provável preço anterior) e menor (provável atual)
-                max_idx = precos_float.index(max(precos_float))
-                min_idx = precos_float.index(min(precos_float))
-                
-                preco_anterior = formatar_preco_real(precos_originais[max_idx])
-                preco_atual = formatar_preco_real(precos_originais[min_idx])
-                
-                logger.info(f"Preço anterior: {preco_anterior}")
-                logger.info(f"Preço atual: {preco_atual}")
-        
-        elif len(todos_precos) == 1:
-            preco_atual = formatar_preco_real(todos_precos[0])
-            preco_anterior = preco_atual
-            logger.info(f"Preço único: {preco_atual}")
-        
-        # ===== 4. ENCONTRAR PARCELAMENTO =====
-        for elem in soup.find_all(['span', 'div', 'p', 'h3']):
-            texto = elem.get_text()
-            # Procurar padrão como "5x R$ 29,40"
-            match = re.search(r'(\d+x\s*R\$\s*[\d.,]+)', texto, re.I)
-            if match:
-                parcelamento = match.group(1)
-                logger.info(f"Parcelamento encontrado: {parcelamento}")
-                break
-        
-        # ===== 5. ENCONTRAR FRETE GRÁTIS =====
-        for elem in soup.find_all(['span', 'div', 'p', 'small']):
-            texto = elem.get_text().lower()
-            if 'frete grátis' in texto or 'frete gratis' in texto:
-                frete_gratis = True
-                logger.info("Frete grátis encontrado")
-                break
-        
-        # ===== MONTAR MENSAGEM =====
-        logger.info("="*50)
-        logger.info("RESULTADO FINAL:")
-        logger.info(f"Nome: {nome[:100]}")
-        logger.info(f"Preço anterior: {preco_anterior}")
-        logger.info(f"Preço atual: {preco_atual}")
-        logger.info(f"Parcelamento: {parcelamento}")
-        logger.info(f"Frete grátis: {frete_gratis}")
-        logger.info("="*50)
-        
-        mensagem = f"📦 *{nome}*\n\n"
-        
-        if preco_anterior and preco_anterior != preco_atual and preco_anterior != "Não encontrado":
-            mensagem += f"~~{preco_anterior}~~ 💰 *{preco_atual}*\n"
-        else:
-            mensagem += f"💰 *{preco_atual}*\n"
-        
-        if parcelamento and parcelamento != "Não informado":
-            mensagem += f"💳 {parcelamento}\n"
-        
-        if frete_gratis:
-            mensagem += "🚚 *Frete Grátis*\n"
-        
-        # Calcular desconto
-        if preco_anterior and preco_atual and preco_anterior != preco_atual and preco_anterior != "Não encontrado" and preco_atual != "Não encontrado":
-            try:
-                ant_num = re.sub(r'[^\d.,]', '', preco_anterior).replace('.', '').replace(',', '.')
-                atu_num = re.sub(r'[^\d.,]', '', preco_atual).replace('.', '').replace(',', '.')
-                
-                ant_float = float(ant_num)
-                atu_float = float(atu_num)
-                
-                if ant_float > 0:
-                    desconto = ((ant_float - atu_float) / ant_float) * 100
-                    mensagem += f"📉 *{desconto:.0f}% OFF*\n"
-            except:
-                pass
-        
-        return mensagem
-        
-    except Exception as e:
-        logger.error(f"Erro ao extrair perfil ML: {e}")
-        return f"❌ Erro ao processar: {str(e)}"
-
 def extrair_dados_amazon_rapido(url):
-    """Extrai dados da Amazon"""
+    """Extrai dados da Amazon (fallback)"""
     try:
         logger.info(f"Extraindo Amazon: {url}")
         
@@ -325,24 +239,18 @@ def extrair_dados_amazon_rapido(url):
             frete_gratis = True
         
         nome = nome if nome else "Nome não encontrado"
-        mensagem = f"📦 *{nome}*\n\n"
         
-        if preco_anterior and preco_anterior != preco_atual:
-            mensagem += f"~~{preco_anterior}~~ 💰 *{preco_atual}*\n"
-        else:
-            mensagem += f"💰 *{preco_atual}*\n"
-        
-        if parcelamento and parcelamento != "Não informado":
-            mensagem += f"💳 {parcelamento}\n"
-        
-        if frete_gratis:
-            mensagem += "🚚 *Frete Grátis*\n"
-        
-        return mensagem
+        return {
+            'nome': nome,
+            'preco_atual': preco_atual,
+            'preco_anterior': preco_anterior,
+            'parcelamento': parcelamento,
+            'frete_gratis': frete_gratis
+        }, None
         
     except Exception as e:
         logger.error(f"Erro Amazon: {e}")
-        return f"❌ Erro ao processar Amazon: {str(e)}"
+        return None, str(e)
 
 async def enviar_telegram_rapido(mensagem):
     """Envia mensagem de forma assíncrona"""
@@ -361,21 +269,14 @@ async def enviar_telegram_rapido(mensagem):
 @app.route('/', methods=['GET'])
 def home():
     return '''
-    <h1>🤖 Bot de Preços - Versão Final</h1>
+    <h1>🤖 Bot de Preços - Versão Oficial</h1>
+    <p>Usando API oficial do Mercado Livre</p>
     <p>Envie links pelo Telegram: @seu_bot</p>
-    <p>📌 Extrai automaticamente:</p>
-    <ul>
-        <li>📦 Nome do produto</li>
-        <li>💰 Preço anterior e atual</li>
-        <li>💳 Parcelamento</li>
-        <li>🚚 Frete grátis</li>
-        <li>📉 Percentual de desconto</li>
-    </ul>
     '''
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Webhook otimizado"""
+    """Webhook principal"""
     try:
         update = request.get_json()
         
@@ -390,44 +291,79 @@ def webhook():
             
             if text.startswith('/start'):
                 asyncio.run(enviar_telegram_rapido(
-                    "🤖 *Bot de Preços - Versão Final* ⚡\n\n"
-                    "Envie um link que eu extraio:\n"
-                    "📌 Nome do produto\n"
-                    "💰 Preço anterior e atual\n"
-                    "💳 Parcelamento\n"
-                    "🚚 Frete grátis\n"
-                    "📉 Desconto\n\n"
+                    "🤖 *Bot de Preços - API Oficial* ⚡\n\n"
+                    "Envie um link do Mercado Livre ou Amazon!\n\n"
                     "📌 *Exemplos:*\n"
-                    "• https://amzn.to/46hzWsh\n"
-                    "• https://mercadolivre.com/sec/2cNNseM"
+                    "• https://mercadolivre.com/sec/2cNNseM\n"
+                    "• https://amzn.to/46hzWsh"
                 ))
             else:
                 if any(x in text for x in ['http', 'amzn.to', 'mercadolivre.com/sec']):
                     
-                    url_final = seguir_redirects_rapido(text)
-                    site = identificar_site_rapido(url_final)
-                    
                     asyncio.run(enviar_telegram_rapido("⏳ Processando..."))
                     
-                    if site == 'amazon':
+                    url_final = seguir_redirects_rapido(text)
+                    
+                    # Identificar site
+                    if 'amazon' in url_final.lower() or 'amzn' in url_final.lower():
+                        # Usar Amazon fallback
                         future = executor.submit(extrair_dados_amazon_rapido, url_final)
-                        mensagem = future.result(timeout=15)
+                        dados, erro = future.result(timeout=15)
                         
-                    elif site == 'mercadolivre':
-                        future = executor.submit(extrair_dados_perfil_ml, url_final)
-                        mensagem = future.result(timeout=15)
+                        if dados:
+                            msg = f"📦 *{dados['nome']}*\n\n"
+                            if dados['preco_anterior'] != dados['preco_atual']:
+                                msg += f"~~{dados['preco_anterior']}~~ 💰 *{dados['preco_atual']}*\n"
+                            else:
+                                msg += f"💰 *{dados['preco_atual']}*\n"
+                            
+                            if dados['parcelamento'] != "Não informado":
+                                msg += f"💳 {dados['parcelamento']}\n"
+                            
+                            if dados['frete_gratis']:
+                                msg += "🚚 *Frete Grátis*\n"
+                            
+                            asyncio.run(enviar_telegram_rapido(msg))
+                        else:
+                            asyncio.run(enviar_telegram_rapido(f"❌ Erro: {erro}"))
+                    
+                    elif any(x in url_final.lower() for x in ['mercadolivre', 'mercadolibre']):
+                        # Extrair ID do produto
+                        produto_id = extrair_id_produto_ml(url_final)
+                        
+                        if not produto_id:
+                            asyncio.run(enviar_telegram_rapido("❌ Não foi possível extrair o ID do produto da URL"))
+                            return 'ok', 200
+                        
+                        logger.info(f"ID do produto: {produto_id}")
+                        
+                        # Consultar API do ML
+                        dados, erro = consultar_produto_ml(produto_id)
+                        
+                        if dados:
+                            msg = f"📦 *{dados['nome']}*\n\n"
+                            
+                            if dados['preco_anterior'] != dados['preco_atual']:
+                                msg += f"~~{dados['preco_anterior']}~~ 💰 *{dados['preco_atual']}*\n"
+                            else:
+                                msg += f"💰 *{dados['preco_atual']}*\n"
+                            
+                            if dados['parcelamento'] != "Não informado":
+                                msg += f"💳 {dados['parcelamento']}\n"
+                            
+                            if dados['frete_gratis']:
+                                msg += "🚚 *Frete Grátis*\n"
+                            
+                            if dados['desconto'] > 0:
+                                msg += f"📉 *{dados['desconto']:.0f}% OFF*\n"
+                            
+                            asyncio.run(enviar_telegram_rapido(msg))
+                        else:
+                            asyncio.run(enviar_telegram_rapido(f"❌ Erro: {erro}"))
                     else:
-                        mensagem = "❌ Link não suportado. Envie apenas Amazon ou Mercado Livre."
-                    
-                    asyncio.run(enviar_telegram_rapido(mensagem))
-                    
+                        asyncio.run(enviar_telegram_rapido("❌ Link não suportado"))
                 else:
-                    asyncio.run(enviar_telegram_rapido(
-                        "❌ Envie um link válido!\n\n"
-                        "Exemplos:\n"
-                        "• https://amzn.to/46hzWsh\n"
-                        "• https://mercadolivre.com/sec/2cNNseM"
-                    ))
+                    asyncio.run(enviar_telegram_rapido("❌ Envie um link válido!"))
         
         return 'ok', 200
         
@@ -437,6 +373,6 @@ def webhook():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
-    logger.info(f"🚀 Bot final iniciado na porta {port}")
-    logger.info("✅ Versão final com suporte completo para Mercado Livre e Amazon")
+    logger.info(f"🚀 Bot com API oficial do ML iniciado na porta {port}")
+    logger.info(f"✅ ML_CLIENT_ID configurado: {ML_CLIENT_ID[:5]}..." if ML_CLIENT_ID else "❌ ML_CLIENT_ID não encontrado")
     app.run(host='0.0.0.0', port=port, threaded=True)
