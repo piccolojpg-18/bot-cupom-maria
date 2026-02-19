@@ -48,16 +48,13 @@ def formatar_preco_real(valor_raw):
         
         # Caso 1: Formato 1.234,56 (já em formato brasileiro)
         if '.' in valor_raw and ',' in valor_raw:
-            # Já está no formato correto, só garantir 2 casas decimais
             partes = valor_raw.split(',')
             if len(partes) == 2:
                 reais = partes[0].replace('.', '')
                 centavos = partes[1].ljust(2, '0')[:2]
-                # Adicionar pontos de milhar de volta
                 if len(reais) > 3:
                     reais = re.sub(r'(\d)(?=(\d{3})+(?!\d))', r'\1.', reais)
-                preco = f"R$ {reais},{centavos}"
-                return preco
+                return f"R$ {reais},{centavos}"
         
         # Caso 2: Formato 1234.56 (padrão americano)
         elif '.' in valor_raw and not ',' in valor_raw:
@@ -65,7 +62,6 @@ def formatar_preco_real(valor_raw):
             if len(partes) == 2:
                 reais = partes[0]
                 centavos = partes[1].ljust(2, '0')[:2]
-                # Adicionar pontos de milhar
                 if len(reais) > 3:
                     reais = re.sub(r'(\d)(?=(\d{3})+(?!\d))', r'\1.', reais)
                 return f"R$ {reais},{centavos}"
@@ -76,31 +72,21 @@ def formatar_preco_real(valor_raw):
             if len(partes) == 2:
                 reais = partes[0]
                 centavos = partes[1].ljust(2, '0')[:2]
-                # Adicionar pontos de milhar
                 if len(reais) > 3:
                     reais = re.sub(r'(\d)(?=(\d{3})+(?!\d))', r'\1.', reais)
                 return f"R$ {reais},{centavos}"
         
-        # Caso 4: Apenas números (ex: 123456)
+        # Caso 4: Apenas números (ex: 14699)
         elif valor_raw.replace('.', '').isdigit():
-            # Remove pontos existentes
             numeros = valor_raw.replace('.', '')
             if len(numeros) > 2:
                 reais = numeros[:-2]
                 centavos = numeros[-2:]
-                # Adicionar pontos de milhar
                 if len(reais) > 3:
                     reais = re.sub(r'(\d)(?=(\d{3})+(?!\d))', r'\1.', reais)
                 return f"R$ {reais},{centavos}"
             else:
                 return f"R$ 0,{numeros.zfill(2)}"
-        
-        # Caso 5: Formato com R$ na frente
-        elif 'R$' in valor_raw:
-            # Extrair apenas números
-            numeros = re.findall(r'[\d.,]+', valor_raw)
-            if numeros:
-                return formatar_preco_real(numeros[0])
         
         return f"R$ {valor_raw}"
         
@@ -144,8 +130,144 @@ def identificar_site_rapido(url):
         return 'mercadolivre'
     return None
 
+def extrair_dados_perfil_ml(url):
+    """
+    Extrai dados completos da página de perfil do Mercado Livre:
+    - Nome completo do produto (laranja) ✅
+    - Preço anterior (amarelo) ✅
+    - Preço atual (rosa) ✅
+    - Parcelamento (roxo) ✅
+    - Frete grátis (verde) ✅
+    """
+    try:
+        logger.info(f"Extraindo dados de perfil ML: {url}")
+        
+        session = requests.Session()
+        response = session.get(url, headers=HEADERS, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # ===== INICIALIZAR VARIÁVEIS =====
+        nome = "Não encontrado"
+        preco_anterior = "Não encontrado"
+        preco_atual = "Não encontrado"
+        parcelamento = "Não informado"
+        frete_gratis = False
+        
+        # ===== ENCONTRAR O PRIMEIRO PRODUTO (MAIS VENDIDO) =====
+        produto_container = None
+        
+        # Método 1: Procurar pelo "MAIS VENDIDO"
+        mais_vendido = soup.find(string=re.compile(r'MAIS VENDIDO', re.I))
+        if mais_vendido:
+            produto_container = mais_vendido.find_parent(['div', 'section', 'article'])
+            logger.info("Encontrou 'MAIS VENDIDO'")
+        
+        # Método 2: Se não achou, pegar o primeiro card de produto
+        if not produto_container:
+            cards = soup.find_all(['div', 'section', 'article'], 
+                                 class_=re.compile(r'card|product|item|andes-card', re.I))
+            if cards:
+                produto_container = cards[0]
+                logger.info("Usando primeiro card de produto")
+        
+        if produto_container:
+            # ===== NOME DO PRODUTO (LARANJA) =====
+            nome_tag = produto_container.find(['h2', 'h3', 'h4', 'p', 'a'], 
+                                            class_=re.compile(r'title|nome|product|name', re.I))
+            if nome_tag:
+                nome = nome_tag.get_text(strip=True)
+                logger.info(f"Nome encontrado: {nome[:50]}")
+            
+            # ===== PREÇOS =====
+            # Encontrar todos os textos com R$
+            textos_preco = produto_container.find_all(string=re.compile(r'R\$\s*[\d.,]+'))
+            
+            precos_encontrados = []
+            for texto in textos_preco:
+                parent = texto.parent
+                texto_completo = parent.get_text()
+                match = re.search(r'R\$\s*([\d.,]+)', texto_completo)
+                if match:
+                    precos_encontrados.append(match.group(1))
+            
+            logger.info(f"Preços encontrados: {precos_encontrados}")
+            
+            # Classificar preços (assumindo que o menor é o atual, maior é o anterior)
+            if len(precos_encontrados) >= 2:
+                # Converter para float para comparar
+                precos_float = []
+                for p in precos_encontrados:
+                    p_clean = p.replace('.', '').replace(',', '.')
+                    try:
+                        precos_float.append(float(p_clean))
+                    except:
+                        pass
+                
+                if len(precos_float) >= 2:
+                    preco_atual_val = min(precos_float)
+                    preco_anterior_val = max(precos_float)
+                    
+                    preco_atual = formatar_preco_real(str(preco_atual_val).replace('.', ','))
+                    preco_anterior = formatar_preco_real(str(preco_anterior_val).replace('.', ','))
+                    
+                    logger.info(f"Preço atual: {preco_atual}, Preço anterior: {preco_anterior}")
+            elif len(precos_encontrados) == 1:
+                preco_atual = formatar_preco_real(precos_encontrados[0])
+                preco_anterior = preco_atual  # Se só tem um, usa o mesmo
+                logger.info(f"Apenas um preço encontrado: {preco_atual}")
+            
+            # ===== PARCELAMENTO (ROXO) =====
+            parcelamento_text = produto_container.find(string=re.compile(r'\d+x\s*R\$\s*[\d.,]+', re.I))
+            if parcelamento_text:
+                parent = parcelamento_text.parent
+                parcelamento = parent.get_text(strip=True)
+                logger.info(f"Parcelamento: {parcelamento}")
+            
+            # ===== FRETE GRÁTIS (VERDE) =====
+            frete_text = produto_container.find(string=re.compile(r'frete\s*grátis|frete\s*gratis', re.I))
+            if frete_text:
+                frete_gratis = True
+                logger.info("Frete grátis encontrado")
+        
+        # ===== MONTAR MENSAGEM =====
+        mensagem = f"📦 *{nome}*\n\n"
+        
+        if preco_anterior and preco_anterior != preco_atual:
+            mensagem += f"~~{preco_anterior}~~ 💰 *{preco_atual}*\n"
+        else:
+            mensagem += f"💰 *{preco_atual}*\n"
+        
+        if parcelamento and parcelamento != "Não informado":
+            mensagem += f"💳 {parcelamento}\n"
+        
+        if frete_gratis:
+            mensagem += "🚚 *Frete Grátis*\n"
+        
+        # Calcular desconto
+        if preco_anterior and preco_atual and preco_anterior != preco_atual and preco_anterior != "Não encontrado" and preco_atual != "Não encontrado":
+            try:
+                # Extrair números para calcular desconto
+                ant_num = re.sub(r'[^\d.,]', '', preco_anterior).replace('.', '').replace(',', '.')
+                atu_num = re.sub(r'[^\d.,]', '', preco_atual).replace('.', '').replace(',', '.')
+                
+                ant_float = float(ant_num)
+                atu_float = float(atu_num)
+                
+                if ant_float > 0:
+                    desconto = ((ant_float - atu_float) / ant_float) * 100
+                    mensagem += f"📉 *{desconto:.0f}% OFF*\n"
+            except:
+                pass
+        
+        logger.info(f"Mensagem gerada: {mensagem[:100]}...")
+        return mensagem
+        
+    except Exception as e:
+        logger.error(f"Erro ao extrair perfil ML: {e}")
+        return f"❌ Erro ao processar: {str(e)}"
+
 def extrair_dados_amazon_rapido(url):
-    """Extrai dados da Amazon de forma otimizada"""
+    """Extrai dados da Amazon (adaptar para mesmo formato)"""
     try:
         logger.info(f"Extraindo Amazon: {url}")
         
@@ -153,129 +275,68 @@ def extrair_dados_amazon_rapido(url):
         response = session.get(url, headers=HEADERS, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Nome do produto
+        # Nome
         nome = None
-        nome_selectors = [
-            ('span', {'id': 'productTitle'}),
-            ('h1', {'class': 'a-size-large'}),
-            ('meta', {'name': 'title'})
-        ]
+        nome_tag = soup.find('span', {'id': 'productTitle'})
+        if nome_tag:
+            nome = nome_tag.get_text(strip=True)
         
-        for tag, attrs in nome_selectors:
-            element = soup.find(tag, attrs)
-            if element:
-                if tag == 'meta':
-                    nome = element.get('content')
-                else:
-                    nome = element.get_text(strip=True)
-                break
+        # Preços
+        preco_atual = None
+        preco_anterior = None
         
-        # Preço
-        preco_raw = None
-        preco_selectors = [
-            ('span', {'class': 'a-price-whole'}),
-            ('span', {'class': 'a-offscreen'}),
-            ('meta', {'property': 'product:price:amount'})
-        ]
+        # Preço atual
+        preco_tag = soup.find('span', {'class': 'a-price-whole'})
+        if preco_tag:
+            preco_atual = preco_tag.get_text(strip=True)
+            centavos = soup.find('span', {'class': 'a-price-fraction'})
+            if centavos:
+                preco_atual = f"{preco_atual}.{centavos.get_text(strip=True)}"
+            preco_atual = formatar_preco_real(preco_atual)
         
-        for tag, attrs in preco_selectors:
-            element = soup.find(tag, attrs)
-            if element:
-                if tag == 'meta':
-                    preco_raw = element.get('content')
-                else:
-                    preco_text = element.get_text(strip=True)
-                    preco_raw = re.sub(r'[^\d.,]', '', preco_text)
-                break
+        # Preço anterior (riscado)
+        antigo_tag = soup.find('span', {'class': 'a-text-price'})
+        if antigo_tag:
+            antigo_text = antigo_tag.get_text()
+            match = re.search(r'R\$\s*([\d.,]+)', antigo_text)
+            if match:
+                preco_anterior = formatar_preco_real(match.group(1))
         
+        if not preco_anterior:
+            preco_anterior = preco_atual
+        
+        # Parcelamento
+        parcelamento = "Não informado"
+        parcela_tag = soup.find(string=re.compile(r'\d+x\s*R\$\s*[\d.,]+', re.I))
+        if parcela_tag:
+            parcelamento = parcela_tag.strip()
+        
+        # Frete grátis
+        frete_gratis = False
+        frete_text = soup.find(string=re.compile(r'frete\s*grátis|Frete\s*GRÁTIS', re.I))
+        if frete_text:
+            frete_gratis = True
+        
+        # Montar mensagem
         nome = nome if nome else "Nome não encontrado"
-        preco = formatar_preco_real(preco_raw) if preco_raw else "Preço não encontrado"
+        mensagem = f"📦 *{nome}*\n\n"
         
-        logger.info(f"Amazon OK: {nome[:50]}... {preco}")
-        return nome, preco
+        if preco_anterior and preco_anterior != preco_atual:
+            mensagem += f"~~{preco_anterior}~~ 💰 *{preco_atual}*\n"
+        else:
+            mensagem += f"💰 *{preco_atual}*\n"
+        
+        if parcelamento and parcelamento != "Não informado":
+            mensagem += f"💳 {parcelamento}\n"
+        
+        if frete_gratis:
+            mensagem += "🚚 *Frete Grátis*\n"
+        
+        return mensagem
         
     except Exception as e:
         logger.error(f"Erro Amazon: {e}")
-        return None, str(e)
-
-def extrair_dados_ml_rapido(url):
-    """Extrai dados do Mercado Livre - VERSÃO COM FORMATAÇÃO EM REAL"""
-    try:
-        logger.info(f"Extraindo ML: {url}")
-        
-        session = requests.Session()
-        response = session.get(url, headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # ===== NOME DO PRODUTO =====
-        nome = None
-        
-        # Título principal
-        titulo = soup.find('h1', class_='ui-pdp-title')
-        if titulo:
-            nome = titulo.get_text(strip=True)
-            logger.info(f"Título encontrado: {nome[:50]}")
-        
-        if not nome:
-            titulo = soup.find('h1', class_='vjs-title')
-            if titulo:
-                nome = titulo.get_text(strip=True)
-        
-        if not nome:
-            meta_og = soup.find('meta', property='og:title')
-            if meta_og:
-                nome = meta_og.get('content')
-        
-        # ===== PREÇO DO PRODUTO =====
-        preco_raw = None
-        
-        # MÉTODO 1: Meta tag price
-        meta_price = soup.find('meta', {'itemprop': 'price'})
-        if meta_price and meta_price.get('content'):
-            preco_raw = meta_price.get('content')
-            logger.info(f"Preço encontrado (meta): {preco_raw}")
-        
-        # MÉTODO 2: Classe andes-money-amount
-        if not preco_raw:
-            andes_price = soup.find('span', class_='andes-money-amount__fraction')
-            if andes_price:
-                preco_raw = andes_price.get_text(strip=True)
-                # Verificar centavos
-                centavos = soup.find('span', class_='andes-money-amount__cents')
-                if centavos and centavos.get_text(strip=True) != '00':
-                    preco_raw = f"{preco_raw}.{centavos.get_text(strip=True)}"
-                logger.info(f"Preço encontrado (andes): {preco_raw}")
-        
-        # MÉTODO 3: Procurar por R$
-        if not preco_raw:
-            for elemento in soup.find_all(['span', 'div', 'p']):
-                texto = elemento.get_text()
-                if 'R$' in texto:
-                    numeros = re.findall(r'R\$\s*([\d.,]+)', texto)
-                    if numeros:
-                        preco_raw = numeros[0]
-                        logger.info(f"Preço encontrado (R$): {preco_raw}")
-                        break
-        
-        # MÉTODO 4: Classe price-tag
-        if not preco_raw:
-            price_tag = soup.find('span', class_='price-tag-fraction')
-            if price_tag:
-                preco_raw = price_tag.get_text(strip=True)
-                logger.info(f"Preço encontrado (price-tag): {preco_raw}")
-        
-        # ===== RESULTADO FINAL =====
-        if not nome:
-            nome = "Nome não encontrado"
-        
-        preco = formatar_preco_real(preco_raw)
-        
-        logger.info(f"Resultado final ML: {nome[:30]}... {preco}")
-        return nome, preco
-        
-    except Exception as e:
-        logger.error(f"Erro ML: {e}")
-        return None, str(e)
+        return f"❌ Erro ao processar Amazon: {str(e)}"
 
 async def enviar_telegram_rapido(mensagem):
     """Envia mensagem de forma assíncrona"""
@@ -294,9 +355,9 @@ async def enviar_telegram_rapido(mensagem):
 @app.route('/', methods=['GET'])
 def home():
     return '''
-    <h1>Bot de Preços Rápido ⚡</h1>
+    <h1>Bot de Preços Completo ⚡</h1>
     <p>Envie links pelo Telegram: @seu_bot</p>
-    <p>Links suportados: Amazon (amzn.to) e Mercado Livre (mercadolivre.com/sec)</p>
+    <p>📌 Extrai: Nome, Preço anterior, Preço atual, Parcelamento, Frete grátis</p>
     '''
 
 @app.route('/webhook', methods=['POST'])
@@ -316,46 +377,35 @@ def webhook():
             
             if text.startswith('/start'):
                 asyncio.run(enviar_telegram_rapido(
-                    "🤖 *Bot de Preços Rápido* ⚡\n\n"
-                    "Envie um link que eu respondo em segundos!\n\n"
+                    "🤖 *Bot de Preços Completo* ⚡\n\n"
+                    "Envie um link que eu extraio:\n"
+                    "📌 Nome do produto\n"
+                    "💰 Preço anterior e atual\n"
+                    "💳 Parcelamento\n"
+                    "🚚 Frete grátis\n\n"
                     "📌 *Exemplos:*\n"
                     "• https://amzn.to/46hzWsh\n"
-                    "• https://mercadolivre.com/sec/267Mk5q\n\n"
-                    "💰 *Preços formatados em Real brasileiro* (R$ 1.234,56)"
+                    "• https://mercadolivre.com/sec/267Mk5q"
                 ))
             else:
-                # Verificar se é link
                 if any(x in text for x in ['http', 'amzn.to', 'mercadolivre.com/sec']):
                     
-                    # Seguir redirect rápido
                     url_final = seguir_redirects_rapido(text)
                     site = identificar_site_rapido(url_final)
                     
-                    # Enviar "processando" imediatamente
                     asyncio.run(enviar_telegram_rapido("⏳ Processando..."))
                     
                     if site == 'amazon':
                         future = executor.submit(extrair_dados_amazon_rapido, url_final)
-                        nome, preco = future.result(timeout=15)
-                        
-                        if nome and nome != "Nome não encontrado":
-                            msg = f"📦 *Amazon*\n\n📌 {nome}\n💰 *Preço:* {preco}"
-                        else:
-                            msg = f"❌ Erro ao extrair dados: {preco}"
+                        mensagem = future.result(timeout=15)
                         
                     elif site == 'mercadolivre':
-                        future = executor.submit(extrair_dados_ml_rapido, url_final)
-                        nome, preco = future.result(timeout=15)
-                        
-                        if nome and nome != "Nome não encontrado":
-                            msg = f"📦 *Mercado Livre*\n\n📌 {nome}\n💰 *Preço:* {preco}"
-                        else:
-                            msg = f"❌ Erro ao extrair dados: {preco}"
+                        future = executor.submit(extrair_dados_perfil_ml, url_final)
+                        mensagem = future.result(timeout=15)
                     else:
-                        msg = "❌ Link não suportado. Envie apenas Amazon ou Mercado Livre."
+                        mensagem = "❌ Link não suportado. Envie apenas Amazon ou Mercado Livre."
                     
-                    # Enviar resposta
-                    asyncio.run(enviar_telegram_rapido(msg))
+                    asyncio.run(enviar_telegram_rapido(mensagem))
                     
                 else:
                     asyncio.run(enviar_telegram_rapido(
@@ -373,6 +423,5 @@ def webhook():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
-    logger.info(f"🚀 Bot rápido iniciado na porta {port}")
-    logger.info("💰 Formatação de preços em Real brasileiro (R$ 1.234,56)")
+    logger.info(f"🚀 Bot completo iniciado na porta {port}")
     app.run(host='0.0.0.0', port=port, threaded=True)
