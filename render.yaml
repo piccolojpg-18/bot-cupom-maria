@@ -16,6 +16,8 @@ services:
         value: "5678"
       - key: N8N_PORT
         value: "5678"
+      - key: N8N_ENCRYPTION_KEY
+        generateValue: true
       - key: DB_TYPE
         value: "postgresdb"
       - key: DB_POSTGRESDB_HOST

@@ -1,3 +1,12 @@
 FROM n8nio/n8n:latest
+
+# Definir variáveis de ambiente
+ENV N8N_PORT=5678
+ENV N8N_PROTOCOL=https
+ENV NODE_ENV=production
+
+# Expor a porta
 EXPOSE 5678
-CMD ["n8n"]
+
+# Comando correto para iniciar o n8n
+CMD ["n8n", "start"]
