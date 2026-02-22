@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 processed_urls = {}
 
 def enviar_telegram(chat_id, texto):
+    """Envia mensagem para o Telegram"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
         requests.post(url, json={'chat_id': chat_id, 'text': texto, 'parse_mode': 'Markdown'}, timeout=5)
@@ -36,13 +37,14 @@ def enviar_telegram(chat_id, texto):
         return False
 
 def criar_driver():
+    """Configura o Chrome com User-Agent de Desktop"""
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
     
-    # FORÇAR VERSÃO DESKTOP (IMPORTANTE!)
+    # FORÇAR VERSÃO DESKTOP
     chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
     chrome_path = "/opt/render/project/.chrome/opt/google/chrome/google-chrome"
@@ -62,9 +64,71 @@ def criar_driver():
             logger.error(f"Erro fallback: {e2}")
             return None
 
+def formatar_preco_br(valor):
+    """
+    Formata preço para R$ 1.234,56
+    Corrige problemas com ponto de milhar
+    """
+    if not valor or valor == "Preço não encontrado":
+        return valor
+    
+    try:
+        # Limpar string
+        valor = str(valor).strip()
+        logger.info(f"Preço raw: {valor}")
+        
+        # Extrair apenas números, ponto e vírgula
+        valor = re.sub(r'[^\d.,]', '', valor)
+        
+        # CASO 1: Tem ponto e vírgula (ex: 1.741,10)
+        if '.' in valor and ',' in valor:
+            # Remove pontos de milhar, mantém vírgula decimal
+            valor = valor.replace('.', '')
+            valor = valor.replace(',', '.')
+        
+        # CASO 2: Só tem ponto (ex: 1741.10 ou 1.74110)
+        elif '.' in valor and ',' not in valor:
+            partes = valor.split('.')
+            if len(partes) == 2:
+                # Se a última parte tem 2 dígitos, é decimal
+                if len(partes[1]) == 2:
+                    valor = valor  # já está correto
+                else:
+                    # Senão, o ponto é milhar
+                    valor = valor.replace('.', '')
+        
+        # CASO 3: Só tem vírgula (ex: 1741,10)
+        elif ',' in valor and '.' not in valor:
+            valor = valor.replace(',', '.')
+        
+        # CASO 4: Só números (ex: 174110)
+        else:
+            if len(valor) > 2:
+                valor = valor[:-2] + '.' + valor[-2:]
+        
+        # Converter para float e formatar
+        if '.' in valor:
+            reais, centavos = valor.split('.')
+            # Garantir que centavos tem 2 dígitos
+            centavos = centavos[:2].ljust(2, '0')
+            
+            # Adicionar pontos de milhar
+            if len(reais) > 3:
+                reais = re.sub(r'(\d)(?=(\d{3})+(?!\d))', r'\1.', reais)
+            
+            resultado = f"R$ {reais},{centavos}"
+            logger.info(f"Preço formatado: {resultado}")
+            return resultado
+        else:
+            return f"R$ {valor},00"
+            
+    except Exception as e:
+        logger.error(f"Erro ao formatar preço: {e}")
+        return f"R$ {valor}"
+
 def processar_mercadolivre(url):
     """
-    FLUXO MERCADO LIVRE CORRIGIDO PARA MOBILE/DESKTOP
+    FLUXO MERCADO LIVRE CORRIGIDO
     """
     driver = None
     try:
@@ -77,74 +141,84 @@ def processar_mercadolivre(url):
         driver.get(url)
         time.sleep(5)
         
-        # VERIFICAR SE É PÁGINA MOBILE E AJUSTAR
+        # VERIFICAR SE É PÁGINA MOBILE
         page_source = driver.page_source
         soup_temp = BeautifulSoup(page_source, 'html.parser')
         
-        # Se tiver "Entrar para" e "Categorias" no topo, é mobile
-        if soup_temp.find(string=re.compile(r'Entrar para')):
-            logger.info("📱 Página mobile detectada - ajustando...")
+        link_encontrado = False
+        
+        # Se for mobile, tentar clicar no primeiro produto
+        if soup_temp.find(string=re.compile(r'Entrar para|Categorias', re.I)):
+            logger.info("📱 Página mobile detectada")
             
-            # Tentar encontrar o link do primeiro produto na página mobile
+            # Método 1: Procurar por "MAIS VENDIDO"
             try:
-                # Método 1: Procurar por "MAIS VENDIDO"
                 mais_vendido = driver.find_element(By.XPATH, "//*[contains(text(), 'MAIS VENDIDO')]")
-                # Clicar no produto mais vendido
                 parent = mais_vendido.find_element(By.XPATH, "./ancestor::a")
                 driver.execute_script("arguments[0].click();", parent)
                 logger.info("✅ Clique via MAIS VENDIDO")
+                link_encontrado = True
                 time.sleep(3)
             except:
+                pass
+            
+            # Método 2: Procurar por link de produto
+            if not link_encontrado:
                 try:
-                    # Método 2: Procurar por qualquer link de produto
                     links = driver.find_elements(By.TAG_NAME, "a")
-                    for link in links:
+                    for link in links[:10]:
                         href = link.get_attribute('href') or ""
                         if any(x in href for x in ['/p/', '/MLB-', 'produto']):
                             driver.execute_script("arguments[0].click();", link)
                             logger.info("✅ Clique via link genérico")
+                            link_encontrado = True
                             time.sleep(3)
                             break
                 except:
                     pass
         
-        # AGORA NA PÁGINA DO PRODUTO, EXTRAIR DADOS
+        # AGORA EXTRAIR DADOS DA PÁGINA DO PRODUTO
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         
-        # Nome
+        # NOME
         nome = "Nome não encontrado"
         titulo = soup.find('h1', class_='ui-pdp-title')
         if not titulo:
             titulo = soup.find('h1')
         if titulo:
             nome = titulo.get_text(strip=True)
-            logger.info(f"📌 Nome: {nome[:50]}...")
+            logger.info(f"📌 Nome encontrado: {nome[:50]}...")
         
-        # Preço
-        preco = "Preço não encontrado"
+        # PREÇO
+        preco_raw = None
         
-        # Tenta meta tag primeiro
+        # Método 1: Meta tag
         meta_price = soup.find('meta', {'itemprop': 'price'})
         if meta_price and meta_price.get('content'):
-            preco = meta_price.get('content')
-        else:
-            # Tenta span de preço
+            preco_raw = meta_price.get('content')
+            logger.info(f"💰 Preço via meta: {preco_raw}")
+        
+        # Método 2: Span de preço
+        if not preco_raw:
             preco_span = soup.find('span', class_='andes-money-amount__fraction')
             if preco_span:
-                preco = preco_span.get_text(strip=True)
+                preco_raw = preco_span.get_text(strip=True)
                 centavos = soup.find('span', class_='andes-money-amount__cents')
                 if centavos:
-                    preco = f"{preco}.{centavos.get_text(strip=True)}"
-            else:
-                # Fallback: qualquer texto com R$
-                texto_preco = soup.find(string=re.compile(r'R\$\s*[\d.,]+'))
-                if texto_preco:
-                    match = re.search(r'R\$\s*([\d.,]+)', texto_preco)
-                    if match:
-                        preco = match.group(1)
+                    preco_raw = f"{preco_raw}.{centavos.get_text(strip=True)}"
+                logger.info(f"💰 Preço via span: {preco_raw}")
         
-        preco = formatar_preco_br(preco)
-        logger.info(f"💰 Preço: {preco}")
+        # Método 3: Qualquer texto com R$
+        if not preco_raw:
+            texto_preco = soup.find(string=re.compile(r'R\$\s*[\d.,]+'))
+            if texto_preco:
+                match = re.search(r'R\$\s*([\d.,]+)', texto_preco)
+                if match:
+                    preco_raw = match.group(1)
+                    logger.info(f"💰 Preço via texto: {preco_raw}")
+        
+        # FORMATAR PREÇO
+        preco = formatar_preco_br(preco_raw) if preco_raw else "Preço não encontrado"
         
         return nome, preco
         
@@ -157,7 +231,7 @@ def processar_mercadolivre(url):
 
 def processar_amazon(url):
     """
-    FLUXO AMAZON (já estava funcionando)
+    FLUXO AMAZON (funcionando)
     """
     driver = None
     try:
@@ -171,22 +245,23 @@ def processar_amazon(url):
         
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         
+        # NOME
         nome = "Nome não encontrado"
         titulo = soup.find('span', {'id': 'productTitle'})
         if titulo:
             nome = titulo.get_text(strip=True)
             logger.info(f"📌 Nome: {nome[:50]}...")
         
-        preco = "Preço não encontrado"
+        # PREÇO
+        preco_raw = None
         preco_span = soup.find('span', {'class': 'a-price-whole'})
         if preco_span:
-            preco = preco_span.get_text(strip=True)
+            preco_raw = preco_span.get_text(strip=True)
             centavos = soup.find('span', {'class': 'a-price-fraction'})
             if centavos:
-                preco = f"{preco}.{centavos.get_text(strip=True)}"
+                preco_raw = f"{preco_raw}.{centavos.get_text(strip=True)}"
         
-        preco = formatar_preco_br(preco)
-        logger.info(f"💰 Preço: {preco}")
+        preco = formatar_preco_br(preco_raw) if preco_raw else "Preço não encontrado"
         
         return nome, preco
         
@@ -198,6 +273,7 @@ def processar_amazon(url):
             driver.quit()
 
 def criar_post_wordpress(titulo, preco, link_original, loja):
+    """Cria post no WordPress"""
     try:
         logger.info(f"📝 [WP] Criando post...")
         
@@ -220,39 +296,18 @@ def criar_post_wordpress(titulo, preco, link_original, loja):
         
         if response.status_code in [200, 201]:
             post_link = response.json().get('link', '')
-            logger.info(f"✅ Post: {post_link}")
+            logger.info(f"✅ Post criado: {post_link}")
             return post_link
         else:
-            logger.error(f"Erro WP: {response.status_code}")
+            logger.error(f"❌ [WP] Erro {response.status_code}")
             return None
             
     except Exception as e:
-        logger.error(f"Erro WP: {e}")
+        logger.error(f"❌ [WP] Erro: {e}")
         return None
 
-def formatar_preco_br(valor):
-    if not valor or valor == "Preço não encontrado":
-        return valor
-    
-    try:
-        valor = re.sub(r'[^\d.,]', '', str(valor))
-        
-        if ',' in valor and '.' in valor:
-            valor = valor.replace('.', '').replace(',', '.')
-        elif ',' in valor:
-            valor = valor.replace(',', '.')
-        
-        if '.' in valor:
-            reais, centavos = valor.split('.')
-            if len(reais) > 3:
-                reais = re.sub(r'(\d)(?=(\d{3})+(?!\d))', r'\1.', reais)
-            return f"R$ {reais},{centavos[:2]}"
-        else:
-            return f"R$ {valor},00"
-    except:
-        return f"R$ {valor}"
-
 def formatar_mensagem_telegram(nome, preco, post_link):
+    """Template fixo de mensagem"""
     msg = f"🎀✨🛍️{nome}\n\n"
     msg += f"💸 por: {preco} 🔥🚨\n\n"
     msg += f"Compre usando o Link 👉 ({post_link})\n\n"
@@ -261,7 +316,7 @@ def formatar_mensagem_telegram(nome, preco, post_link):
 
 @app.route('/', methods=['GET'])
 def home():
-    return "✅ Bot Funcional - Mercado Livre (corrigido) e Amazon"
+    return "✅ Bot Funcional - Versão Final Corrigida"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -272,16 +327,20 @@ def webhook():
             chat_id = data['message']['chat']['id']
             texto = data['message'].get('text', '').strip()
             
+            # Evitar duplicatas (5 minutos)
             if texto in processed_urls:
                 if time.time() - processed_urls[texto] < 300:
+                    logger.info("⏱️ URL já processada")
                     return 'ok', 200
             
             processed_urls[texto] = time.time()
             
             if texto == '/start':
                 enviar_telegram(chat_id, 
-                    "🤖 *Bot Funcional*\n\n"
-                    "✅ Mercado Livre e Amazon funcionando!"
+                    "🤖 *Bot Funcional - Versão Final*\n\n"
+                    "✅ Mercado Livre corrigido!\n"
+                    "✅ Amazon funcionando!\n\n"
+                    "Envie qualquer link que eu processo!"
                 )
                 return 'ok', 200
             
@@ -291,6 +350,7 @@ def webhook():
             preco = None
             loja = None
             
+            # Identificar site
             if 'mercadolivre' in texto.lower() or 'mercadolivre.com/sec' in texto.lower():
                 loja = 'Mercado Livre'
                 nome, preco = processar_mercadolivre(texto)
@@ -301,7 +361,11 @@ def webhook():
                 enviar_telegram(chat_id, "❌ Envie link do Mercado Livre ou Amazon")
                 return 'ok', 200
             
-            if nome and preco and nome != "Nome não encontrado":
+            # Validar dados
+            if nome and preco and nome != "Nome não encontrado" and preco != "Preço não encontrado":
+                logger.info(f"✅ Dados OK - Nome: {nome[:30]}... Preço: {preco}")
+                
+                # Criar post
                 post_link = criar_post_wordpress(nome, preco, texto, loja)
                 
                 if post_link:
@@ -310,15 +374,16 @@ def webhook():
                 else:
                     enviar_telegram(chat_id, "❌ Erro ao criar post no WordPress")
             else:
+                logger.warning(f"❌ Dados inválidos - Nome: {nome}, Preço: {preco}")
                 enviar_telegram(chat_id, "❌ Não consegui encontrar nome e preço do produto")
         
         return 'ok', 200
         
     except Exception as e:
-        logger.error(f"Erro: {e}")
+        logger.error(f"❌ Erro webhook: {e}")
         return 'ok', 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
-    logger.info(f"🚀 Bot iniciado na porta {port}")
+    logger.info(f"🚀 Bot versão final iniciado na porta {port}")
     app.run(host='0.0.0.0', port=port)
