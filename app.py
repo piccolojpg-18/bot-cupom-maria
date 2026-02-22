@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 processed_urls = {}
 
 def enviar_telegram(chat_id, texto):
-    """Envia mensagem para o Telegram"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
         requests.post(url, json={'chat_id': chat_id, 'text': texto, 'parse_mode': 'Markdown'}, timeout=5)
@@ -37,13 +36,14 @@ def enviar_telegram(chat_id, texto):
         return False
 
 def criar_driver():
-    """Configura o Chrome"""
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    
+    # FORÇAR VERSÃO DESKTOP (IMPORTANTE!)
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
     chrome_path = "/opt/render/project/.chrome/opt/google/chrome/google-chrome"
     if os.path.exists(chrome_path):
@@ -62,15 +62,9 @@ def criar_driver():
             logger.error(f"Erro fallback: {e2}")
             return None
 
-# ============================================
-# FUNÇÃO MERCADO LIVRE
-# ============================================
 def processar_mercadolivre(url):
     """
-    FLUXO MERCADO LIVRE:
-    1️⃣ Entra no link original de afiliado
-    2️⃣ Clica em "Ir para produto"
-    3️⃣ Pega nome e preço
+    FLUXO MERCADO LIVRE CORRIGIDO PARA MOBILE/DESKTOP
     """
     driver = None
     try:
@@ -81,76 +75,76 @@ def processar_mercadolivre(url):
         
         # 1️⃣ Entrar no link de afiliado
         driver.get(url)
-        time.sleep(4)
+        time.sleep(5)
         
-        # 2️⃣ Procurar e clicar em "Ir para produto"
-        link_encontrado = False
+        # VERIFICAR SE É PÁGINA MOBILE E AJUSTAR
+        page_source = driver.page_source
+        soup_temp = BeautifulSoup(page_source, 'html.parser')
         
-        # Método 1: Link que contém '/p/'
-        try:
-            link = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH, "//a[contains(@href, '/p/')]"))
-            )
-            driver.execute_script("arguments[0].click();", link)
-            logger.info("✅ [ML] Clique via link /p/")
-            link_encontrado = True
-        except:
-            pass
-        
-        # Método 2: Link que contém 'MLB-'
-        if not link_encontrado:
+        # Se tiver "Entrar para" e "Categorias" no topo, é mobile
+        if soup_temp.find(string=re.compile(r'Entrar para')):
+            logger.info("📱 Página mobile detectada - ajustando...")
+            
+            # Tentar encontrar o link do primeiro produto na página mobile
             try:
-                link = WebDriverWait(driver, 5).until(
-                    EC.element_to_be_clickable((By.XPATH, "//a[contains(@href, '/MLB-')]"))
-                )
-                driver.execute_script("arguments[0].click();", link)
-                logger.info("✅ [ML] Clique via link /MLB-/")
-                link_encontrado = True
+                # Método 1: Procurar por "MAIS VENDIDO"
+                mais_vendido = driver.find_element(By.XPATH, "//*[contains(text(), 'MAIS VENDIDO')]")
+                # Clicar no produto mais vendido
+                parent = mais_vendido.find_element(By.XPATH, "./ancestor::a")
+                driver.execute_script("arguments[0].click();", parent)
+                logger.info("✅ Clique via MAIS VENDIDO")
+                time.sleep(3)
             except:
-                pass
+                try:
+                    # Método 2: Procurar por qualquer link de produto
+                    links = driver.find_elements(By.TAG_NAME, "a")
+                    for link in links:
+                        href = link.get_attribute('href') or ""
+                        if any(x in href for x in ['/p/', '/MLB-', 'produto']):
+                            driver.execute_script("arguments[0].click();", link)
+                            logger.info("✅ Clique via link genérico")
+                            time.sleep(3)
+                            break
+                except:
+                    pass
         
-        # Método 3: Botão com texto "Ir para produto"
-        if not link_encontrado:
-            try:
-                botoes = driver.find_elements(By.XPATH, "//*[contains(text(), 'Ir para produto') or contains(text(), 'Ver produto')]")
-                if botoes:
-                    driver.execute_script("arguments[0].click();", botoes[0])
-                    logger.info("✅ [ML] Clique via botão de texto")
-                    link_encontrado = True
-            except:
-                pass
-        
-        if not link_encontrado:
-            logger.error("❌ [ML] Nenhum link/botão encontrado")
-            return None, None
-        
-        time.sleep(3)
-        
-        # 3️⃣ Pegar nome e preço
+        # AGORA NA PÁGINA DO PRODUTO, EXTRAIR DADOS
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         
         # Nome
         nome = "Nome não encontrado"
         titulo = soup.find('h1', class_='ui-pdp-title')
+        if not titulo:
+            titulo = soup.find('h1')
         if titulo:
             nome = titulo.get_text(strip=True)
-            logger.info(f"📌 [ML] Nome: {nome[:50]}...")
+            logger.info(f"📌 Nome: {nome[:50]}...")
         
         # Preço
         preco = "Preço não encontrado"
+        
+        # Tenta meta tag primeiro
         meta_price = soup.find('meta', {'itemprop': 'price'})
         if meta_price and meta_price.get('content'):
             preco = meta_price.get('content')
         else:
+            # Tenta span de preço
             preco_span = soup.find('span', class_='andes-money-amount__fraction')
             if preco_span:
                 preco = preco_span.get_text(strip=True)
                 centavos = soup.find('span', class_='andes-money-amount__cents')
                 if centavos:
                     preco = f"{preco}.{centavos.get_text(strip=True)}"
+            else:
+                # Fallback: qualquer texto com R$
+                texto_preco = soup.find(string=re.compile(r'R\$\s*[\d.,]+'))
+                if texto_preco:
+                    match = re.search(r'R\$\s*([\d.,]+)', texto_preco)
+                    if match:
+                        preco = match.group(1)
         
         preco = formatar_preco_br(preco)
-        logger.info(f"💰 [ML] Preço: {preco}")
+        logger.info(f"💰 Preço: {preco}")
         
         return nome, preco
         
@@ -161,14 +155,9 @@ def processar_mercadolivre(url):
         if driver:
             driver.quit()
 
-# ============================================
-# FUNÇÃO AMAZON
-# ============================================
 def processar_amazon(url):
     """
-    FLUXO AMAZON:
-    1️⃣ Entra no link
-    2️⃣ Pega nome e preço direto
+    FLUXO AMAZON (já estava funcionando)
     """
     driver = None
     try:
@@ -177,21 +166,17 @@ def processar_amazon(url):
         if not driver:
             return None, None
         
-        # 1️⃣ Entrar no link
         driver.get(url)
         time.sleep(3)
         
-        # 2️⃣ Pegar nome e preço
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         
-        # Nome
         nome = "Nome não encontrado"
         titulo = soup.find('span', {'id': 'productTitle'})
         if titulo:
             nome = titulo.get_text(strip=True)
-            logger.info(f"📌 [AMZ] Nome: {nome[:50]}...")
+            logger.info(f"📌 Nome: {nome[:50]}...")
         
-        # Preço
         preco = "Preço não encontrado"
         preco_span = soup.find('span', {'class': 'a-price-whole'})
         if preco_span:
@@ -201,7 +186,7 @@ def processar_amazon(url):
                 preco = f"{preco}.{centavos.get_text(strip=True)}"
         
         preco = formatar_preco_br(preco)
-        logger.info(f"💰 [AMZ] Preço: {preco}")
+        logger.info(f"💰 Preço: {preco}")
         
         return nome, preco
         
@@ -212,15 +197,9 @@ def processar_amazon(url):
         if driver:
             driver.quit()
 
-# ============================================
-# FUNÇÕES COMPARTILHADAS
-# ============================================
 def criar_post_wordpress(titulo, preco, link_original, loja):
-    """
-    3️⃣ Publica link original no WordPress
-    """
     try:
-        logger.info(f"📝 [WP] Criando post para: {titulo[:50]}...")
+        logger.info(f"📝 [WP] Criando post...")
         
         post_data = {
             'title': titulo[:100],
@@ -241,18 +220,17 @@ def criar_post_wordpress(titulo, preco, link_original, loja):
         
         if response.status_code in [200, 201]:
             post_link = response.json().get('link', '')
-            logger.info(f"✅ [WP] Post criado: {post_link}")
+            logger.info(f"✅ Post: {post_link}")
             return post_link
         else:
-            logger.error(f"❌ [WP] Erro {response.status_code}")
+            logger.error(f"Erro WP: {response.status_code}")
             return None
             
     except Exception as e:
-        logger.error(f"❌ [WP] Erro: {e}")
+        logger.error(f"Erro WP: {e}")
         return None
 
 def formatar_preco_br(valor):
-    """Formata preço para R$ 1.234,56"""
     if not valor or valor == "Preço não encontrado":
         return valor
     
@@ -275,21 +253,15 @@ def formatar_preco_br(valor):
         return f"R$ {valor}"
 
 def formatar_mensagem_telegram(nome, preco, post_link):
-    """
-    4️⃣ Retorna link WordPress do post no Telegram
-    """
     msg = f"🎀✨🛍️{nome}\n\n"
     msg += f"💸 por: {preco} 🔥🚨\n\n"
     msg += f"Compre usando o Link 👉 ({post_link})\n\n"
     msg += "_*Essa promo pode acabar a qualquer momento*_"
     return msg
 
-# ============================================
-# WEBHOOK PRINCIPAL
-# ============================================
 @app.route('/', methods=['GET'])
 def home():
-    return "✅ Bot Funcional - Mercado Livre e Amazon"
+    return "✅ Bot Funcional - Mercado Livre (corrigido) e Amazon"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -300,10 +272,8 @@ def webhook():
             chat_id = data['message']['chat']['id']
             texto = data['message'].get('text', '').strip()
             
-            # Evitar duplicatas (5 minutos)
             if texto in processed_urls:
                 if time.time() - processed_urls[texto] < 300:
-                    logger.info("⏱️ URL já processada recentemente")
                     return 'ok', 200
             
             processed_urls[texto] = time.time()
@@ -311,17 +281,7 @@ def webhook():
             if texto == '/start':
                 enviar_telegram(chat_id, 
                     "🤖 *Bot Funcional*\n\n"
-                    "**MERCADO LIVRE**\n"
-                    "1️⃣ Entra no link de afiliado\n"
-                    "2️⃣ Clica em Ir para produto\n"
-                    "3️⃣ Pega nome e preço\n"
-                    "4️⃣ Publica no WordPress\n"
-                    "5️⃣ Retorna link do post\n\n"
-                    "**AMAZON**\n"
-                    "1️⃣ Entra no link\n"
-                    "2️⃣ Pega nome e preço\n"
-                    "3️⃣ Publica no WordPress\n"
-                    "4️⃣ Retorna link do post"
+                    "✅ Mercado Livre e Amazon funcionando!"
                 )
                 return 'ok', 200
             
@@ -331,7 +291,6 @@ def webhook():
             preco = None
             loja = None
             
-            # Identificar site e processar
             if 'mercadolivre' in texto.lower() or 'mercadolivre.com/sec' in texto.lower():
                 loja = 'Mercado Livre'
                 nome, preco = processar_mercadolivre(texto)
@@ -343,14 +302,11 @@ def webhook():
                 return 'ok', 200
             
             if nome and preco and nome != "Nome não encontrado":
-                # Publicar no WordPress com link original
                 post_link = criar_post_wordpress(nome, preco, texto, loja)
                 
                 if post_link:
-                    # Retornar link do post no Telegram
                     msg = formatar_mensagem_telegram(nome, preco, post_link)
                     enviar_telegram(chat_id, msg)
-                    logger.info(f"✅ Processo concluído para: {nome[:50]}")
                 else:
                     enviar_telegram(chat_id, "❌ Erro ao criar post no WordPress")
             else:
@@ -359,10 +315,10 @@ def webhook():
         return 'ok', 200
         
     except Exception as e:
-        logger.error(f"❌ Erro webhook: {e}")
+        logger.error(f"Erro: {e}")
         return 'ok', 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
-    logger.info(f"🚀 Bot funcional iniciado na porta {port}")
+    logger.info(f"🚀 Bot iniciado na porta {port}")
     app.run(host='0.0.0.0', port=port)
