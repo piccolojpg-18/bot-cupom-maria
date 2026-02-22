@@ -12,5 +12,12 @@ services:
         value: "admin"
       - key: N8N_BASIC_AUTH_PASSWORD
         value: "123456"
+      - key: PORT
+        value: "5678"
       - key: N8N_PORT
         value: "5678"
+    disk:
+      name: n8n-data
+      mountPath: /home/node/.n8n
+      sizeGB: 1
+    healthCheckPath: /healthz
