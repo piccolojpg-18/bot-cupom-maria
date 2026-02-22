@@ -51,11 +51,12 @@ def criar_post_wordpress(dados_produto, link_original):
         
         titulo = dados_produto['nome'][:100]
         
+        # Criar slug amigável
         slug = re.sub(r'[^\w\s]', '', titulo.lower())
         slug = '-'.join(slug.split()[:5])[:50]
         slug = slug.replace('--', '-').strip('-')
         
-        # Extrair parcelamento
+        # Extrair parcelamento (se existir)
         parcelas = dados_produto.get('parcelas', '')
         parcela_texto = ''
         if parcelas and parcelas != "Não informado":
@@ -63,11 +64,10 @@ def criar_post_wordpress(dados_produto, link_original):
             if match:
                 parcela_texto = match.group(1)
         
-        # Converter preços para número (sem R$, sem pontos)
+        # Converter preços para número
         preco_novo_num = None
         if dados_produto.get('preco_atual'):
-            preco_str = dados_produto['preco_atual'].replace('R$', '').strip()
-            preco_str = preco_str.replace('.', '').replace(',', '.')
+            preco_str = dados_produto['preco_atual'].replace('R$', '').replace('.', '').replace(',', '.').strip()
             try:
                 preco_novo_num = float(preco_str)
             except:
@@ -75,8 +75,7 @@ def criar_post_wordpress(dados_produto, link_original):
         
         preco_antigo_num = None
         if dados_produto.get('preco_antigo'):
-            preco_str = dados_produto['preco_antigo'].replace('R$', '').strip()
-            preco_str = preco_str.replace('.', '').replace(',', '.')
+            preco_str = dados_produto['preco_antigo'].replace('R$', '').replace('.', '').replace(',', '.').strip()
             try:
                 preco_antigo_num = float(preco_str)
             except:
@@ -93,9 +92,13 @@ def criar_post_wordpress(dados_produto, link_original):
                 'percentual': dados_produto.get('percentual'),
                 'loja': dados_produto.get('loja'),
                 'link_afiliado': link_original,
-                'parcelas': parcela_texto
+                'tempo': 'há 0h'  # Valor padrão
             }
         }
+        
+        # Se tiver parcelas, adicionar (se o campo existir)
+        if parcela_texto:
+            post_data['meta']['parcelas'] = parcela_texto
         
         logger.info(f"Dados enviados: {post_data}")
         
